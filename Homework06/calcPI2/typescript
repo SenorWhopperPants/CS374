@@ -1,0 +1,221 @@
+Script started on 2019-11-02 20:19:50-0400
+]0;jmb237@maroon06: ~/cs374/Homework06/calcPI2[01;32mjmb237@maroon06[00m:[01;34m~/cs374/Homework06/calcPI2[00m$ cat *.c
+/* calcPI2.c calculates PI using POSIX threads.
+ * Since PI == 4 * arctan(1), and arctan(x) is the 
+ *  integral from 0 to x of (1/(1+x*x),
+ *  the for loop below approximates that integration.
+ *
+ * Joel Adams, Calvin College, Fall 2013.
+ *
+ * Usage: ./calcPI2 [numIntervals] [numThreads]
+ * 
+ * Edited by Josh Bussis on 11/2/2019 by changing the program from mutual-exclusion to 
+ *          to a reduction method to sum the result.  Also, added the file pthreadReduction.h
+ *          to the project.  This edit was made for Project 06 of CS 374 at Calvin University.
+ */
+
+#include <stdio.h>                 // printf(), fprintf(), etc.
+#include <stdlib.h>                // strtoul(), exit(), ...
+#include <pthread.h>               // pthreads
+#include <mpi.h>                   // MPI_Wtime()
+#include "pthreadReduction.h"      // pthreadReductionSum()
+
+// global variables (shared by all threads 
+volatile long double pi = 0.0;       // our approximation of PI 
+pthread_mutex_t      piLock;         // how we synchronize writes to 'pi' 
+long double          intervals = 0;  // how finely we chop up the integration 
+unsigned long        numThreads = 0; // how many threads we use 
+long double *        localSumArray;
+
+/* compute PI using the parallel for loop pattern
+ * Parameters: arg, a void* 
+ * Preconditions: 
+ *   - non-locals intervals and numThreads are defined.
+ *   - arg contains the address of our thread's ID.
+ * Postcondition: non-local pi contains our approximation of PI.
+ */
+void * computePI(void * arg)
+{
+    long double   x,
+                  width,
+                  localSum = 0;
+    unsigned long i,
+                  threadID = *((unsigned long *)arg);
+
+
+    width = 1.0 / intervals;
+
+    for(i = threadID ; i < intervals; i += numThreads) {
+        x = (i + 0.5) * width;
+        localSum += 4.0 / (1.0 + x*x);
+    }
+
+    localSum *= width; 
+    // put the localSum value in its correct place in the array
+    localSumArray[threadID] = localSum;
+
+    /* replace these with personal function call
+    pthread_mutex_lock(&piLock);
+    pi += localSum;
+    pthread_mutex_unlock(&piLock); 
+    */
+    // calling personal reduction function
+    pthreadReductionSum(&pi, localSumArray, threadID, numThreads);
+
+    return NULL;
+} 
+
+/* process the command-line arguments
+ * Parameters: argc, an int; and argv a char**.
+ * Postcondition:
+ *  - non-locals intervals and numThreads have been defined.
+ *     according to the values the user specified when
+ *     calcPI2 was invoked.
+ */
+void processCommandLine(int argc, char ** argv) {
+   if ( argc == 3 ) {
+      intervals = strtoul(argv[1], 0, 10); 
+      numThreads = strtoul(argv[2], 0, 10); 
+   } else if ( argc == 2 ) {
+      intervals = strtoul(argv[1], 0, 10);
+      numThreads = 1;
+   } else if ( argc == 1 ) {
+      intervals = 1;
+      numThreads = 1;
+   } else {
+      fprintf(stderr, "\nUsage: calcPI2 [intervals] [numThreads]\n\n");
+      exit(1);
+   }
+}
+      
+
+int main(int argc, char **argv) {
+    pthread_t * threads;            // dynamic array of threads 
+    unsigned long  * threadID;      // dynamic array of thread id #s 
+    unsigned long i;                // loop control variable 
+    double startTime = 0,           // timing variables
+           stopTime = 0;
+
+    processCommandLine(argc, argv);
+
+    threads = malloc(numThreads*sizeof(pthread_t));
+    threadID = malloc(numThreads*sizeof(unsigned long));
+    // allocate memory for the array
+    localSumArray = (long double *)malloc( numThreads * sizeof(long double) );
+    pthread_mutex_init(&piLock, NULL);
+
+    startTime = MPI_Wtime();
+
+    for (i = 0; i < numThreads; i++) {   // fork threads
+        threadID[i] = i;
+        pthread_create(&threads[i], NULL, computePI, threadID+i);
+    }
+
+    for (i = 0; i < numThreads; i++) {   // join them
+        pthread_join(threads[i], NULL);
+    }
+    stopTime = MPI_Wtime();
+
+    printf("Estimation of pi is %32.30Lf in %lf secs\n", pi, stopTime - startTime);
+    printf("(actual pi value is 3.141592653589793238462643383279...)\n");
+   
+    pthread_mutex_destroy(&piLock);
+    // free up dynamic arrays
+    free(threads);
+    free(threadID);
+    free(localSumArray);
+    return 0;
+}
+
+]0;jmb237@maroon06: ~/cs374/Homework06/calcPI2[01;32mjmb237@maroon06[00m:[01;34m~/cs374/Homework06/calcPI2[00m$ cat *.h
+/* pthreadBarrier.h implements the Barrier pattern using pthreads.
+ *
+ * Joel Adams, Calvin College, Fall 2013.
+ */
+
+#include <pthread.h>    // various pthread functions
+
+// Shared Variables used to implement the barrier
+   pthread_mutex_t barrierMutex = PTHREAD_MUTEX_INITIALIZER;
+   pthread_cond_t allThreadsPresent = PTHREAD_COND_INITIALIZER;
+   double barrierThreadCount = 0;
+
+/* the Barrier pattern for pthreads
+ * params: numThreads, the number of threads being synchronized
+ * postcondition: all of those threads have reached this call
+ *                 and are now ready to proceed.
+ */
+void pthreadBarrier(unsigned long numThreads) {
+   pthread_mutex_lock( &barrierMutex );
+   barrierThreadCount++;
+   if (barrierThreadCount == numThreads) {
+      barrierThreadCount = 0;
+      pthread_cond_broadcast( &allThreadsPresent );
+   } else {
+      while ( pthread_cond_wait( &allThreadsPresent, &barrierMutex) != 0 );
+   }
+   pthread_mutex_unlock( &barrierMutex );
+}
+
+void barrierCleanup() {
+   pthread_mutex_destroy(&barrierMutex);
+   pthread_cond_destroy(&allThreadsPresent);
+}
+/**
+ * pthreadReduction.h contains the function pthreadReductionSum() which 
+ *      implements a sum reduction for use with POSIX threads.
+ * 
+ * @author  Josh Bussis
+ * @date    11/2/2019
+ * @class   CS 374, Project 06
+ * @Where   Calvin University
+ */
+#include <stdlib.h>
+#include "pthreadBarrier.h"
+#include <stdio.h>
+
+/**
+ * @brief   pthreadReductionSum() is a function to perform a sum reduction on an array with multithreading.
+ *                                This function performs the sum in O(ln(N)) time
+ * 
+ * @author  Josh Bussis
+ * @date    11/2/2019
+ * @param   totalSum (volatile long double *)
+ * @param   localSumArray (long double *)
+ * @param   threadID (unsigned long)
+ * @param   numThreads (unsigned long)
+ * @return  void
+*/
+void pthreadReductionSum(volatile long double * totalSum, long double * localSumArray, unsigned long threadID, unsigned long numThreads) {
+    
+    // synchronize all of the threads
+    pthreadBarrier(numThreads);
+
+    // go through the array and sum the results via the tree method
+    // do the reduction as long as there's values to add
+    // the variable arrayOffset holds the offset value for the respective index to add itself and itself+arrayOffset's value
+    // arrayOffset>>=1 bit-shifts arrayOffset 1 to the right, which divides by two, but faster than divide function
+    // slide deck from nvidia helped with the syntax slightly, but I would have figured it out on my own anyway
+    for (unsigned long arrayOffset = (unsigned long)(numThreads / 2); arrayOffset > 0; arrayOffset>>=1) {
+        // let only the desired threads to do the work
+        if (threadID < arrayOffset) {
+            localSumArray[threadID] += localSumArray[(int)(threadID + arrayOffset)];
+        }
+        // synchronize the threads before moving on
+        pthreadBarrier(numThreads);
+    }
+    // clean up the barrier
+    barrierCleanup();
+    // store the first item in the array since this will be the sum of the whole array
+    // only let thread 0 do this so there's no issues
+    if (threadID == 0) {
+        *totalSum = localSumArray[0];
+    }
+}]0;jmb237@maroon06: ~/cs374/Homework06/calcPI2[01;32mjmb237@maroon06[00m:[01;34m~/cs374/Homework06/calcPI2[00m$ make
+mpicc -Wall -ansi -pedantic -std=c99 -I/opt/openmpi/include calcPI2.c -o calcPI2 -lpthread -lmpi
+]0;jmb237@maroon06: ~/cs374/Homework06/calcPI2[01;32mjmb237@maroon06[00m:[01;34m~/cs374/Homework06/calcPI2[00m$ ./calcPI2 1000000000 4
+Estimation of pi is 3.141592653589793591745876755184 in 1.523912 secs
+(actual pi value is 3.141592653589793238462643383279...)
+]0;jmb237@maroon06: ~/cs374/Homework06/calcPI2[01;32mjmb237@maroon06[00m:[01;34m~/cs374/Homework06/calcPI2[00m$ exit
+
+Script done on 2019-11-02 20:20:53-0400
